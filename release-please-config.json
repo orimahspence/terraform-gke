@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "terraform-module",
+  "bootstrap-sha": "d4c95006e2572f6d94d7248834815d9fbc0dd508",
+  "packages": {
+    "modules/private-service-connect": {
+      "package-name": "private-service-connect"
+    },
+    "modules/vpc-peering": {
+      "package-name": "vpc-peering"
+    },
+    "modules/private-service-connect-securehub": {
+      "package-name": "private-service-connect-securehub"
+    }
+  }
+}
