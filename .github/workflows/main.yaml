@@ -1,0 +1,119 @@
+name: GKE Terraform Module Release Channel
+on:
+  push:
+    branches:
+      - main
+    paths: 
+      - "modules/**"
+
+env:
+  CI: true
+
+jobs:
+  release-please:
+    runs-on: self-hosted
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+    steps:
+      - id: release
+        uses: google-github-actions/release-please-action@v3
+        with:
+          release-type: terraform-module
+          command: manifest
+          monorepo-tags: true
+
+  get-bumped-modules:
+    runs-on: self-hosted
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created }}
+    name: 'Get modified modules'
+    permissions:
+      contents: read
+    outputs:
+      modules: ${{ steps.get-bumped-modules.outputs.modules }}
+      result: ${{ steps.get-bumped-modules.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # to be able to obtain files changed in the latest commit
+      - id: get-bumped-modules
+        name: 'Get modified modules'
+        run: |
+
+          # get the changed files
+          files_changed="$(git show --pretty="" --name-only)"
+          echo "files_changed=$files_changed"
+
+          # get the directories that includes .tf file changes to get the modules that changed version
+          module_file_changed="$(echo $files_changed | grep -E 'versions.tf' | xargs dirname | grep -o "modules/[^/]*" | sort | uniq || true)"
+
+          # Initialize an empty array for version-changed modules
+          version_changed_modules=()
+
+          for module in $module_file_changed; do
+            # Check if there's a version change in the .tf file
+            if git show "$module" | grep -q "+    module_name"; then
+              version_changed_modules+=("$module")
+            fi
+          done
+          
+          # make the outputs
+          if [ ${#version_changed_modules[@]} -gt 0 ]; then
+            echo "modules=${version_changed_modules[@]}" >>$GITHUB_OUTPUT
+            echo "result=ok" >>$GITHUB_OUTPUT
+          else
+            echo "error=No version changed modules found" >>$GITHUB_OUTPUT
+            echo "result=fail" >>$GITHUB_OUTPUT
+          fi
+
+          # print the outputs
+          cat $GITHUB_OUTPUT
+
+      - id: show-warning
+        name: 'Show Warning'
+        if: ${{ steps.get-bumped-modules.outputs.result == 'fail' }}
+        run: |
+          echo "${{ steps.get-bumped-modules.outputs.error }}"
+          echo "publish jobs/steps will be interrupted"
+
+  publish-modules:
+    runs-on: self-hosted
+    needs: get-bumped-modules
+    if: ${{ needs.get-bumped-modules.outputs.result == 'ok' }}
+    name: Publish modules to registry
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install JFrog CLI
+        id: install-jf-cli
+        run: |
+          curl -fL https://install-cli.jfrog.io | sh
+
+      - name: Setup JFrog CLI
+        id: setup-jf-cli
+        run: |
+          jf config add cvsh \
+          --overwrite=true \
+          --interactive=false \
+          --access-token="${{ secrets.AF_ACCESS_TOKEN }}" \
+          --url="https://cvsh.jfrog.io/"
+
+          jf tfc --global --server-id-deploy cvsh --repo-deploy cvsdigital-tf-modules-local
+
+      - name: Build the package of updated modules
+        id: package-modules
+        run: |
+          version_changed_modules="${{needs.get-bumped-modules.outputs.modules}}"
+          
+          for dir in ${version_changed_modules}; do
+            cd $dir
+            tag=$(grep -E '^[[:space:]]*module_name[[:space:]]*=' versions.tf | sed -E 's/^[[:space:]]*([^[:space:]]+)[[:space:]]*=[[:space:]]*"([^"]+)".*$/\2/' | cut -d "/" -f2)
+            jf tf p --namespace=terraform-gke --provider=gcp --tag=$tag
+            cd ../..
+          done
